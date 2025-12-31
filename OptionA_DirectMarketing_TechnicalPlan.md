@@ -136,51 +136,117 @@ Deliverable: a model comparison table (PR‑AUC, ROC‑AUC, precision@K).
 
 ## 8) Probability calibration (so profit/threshold logic is defensible)
 
+Your business decision rule uses **probabilities** (e.g., call if `P * p̂ − C > 0` ⇔ `p̂ ≥ C/P`). That only makes sense if `p̂` is reasonably **calibrated** (a score of 0.20 should mean “~20% of similar customers convert”).
+
 ### 8.1 Diagnose calibration
-- Use `sklearn.calibration.CalibrationDisplay.from_estimator`.
-- Compute Brier score on validation and test.
+- Do this **before choosing** a profit threshold, and do it on **validation** (not the test set).
+- Produce a reliability diagram:
+  - `sklearn.calibration.CalibrationDisplay.from_estimator(model, X_val, y_val, n_bins=10, strategy="quantile")`
+  - Use `"quantile"` bins so each bin has similar sample size (more stable with imbalance).
+- Report a proper scoring rule:
+  - **Brier score** (`sklearn.metrics.brier_score_loss(y_val, p̂_val)`) — lower is better.
+- Optional (nice-to-have, not required): calibration-in-the-large (mean `p̂` vs base rate) and a short note if probabilities are systematically too high/low.
+
+Deliverable (slide-ready): one reliability curve + a small table with `Brier` and base rate on validation.
 
 ### 8.2 Calibrate if needed
-- Use `CalibratedClassifierCV(base_estimator=..., method='sigmoid' or 'isotonic', cv=...)`
-- Fit calibrator using train+validation (or CV on train).
-- Re-check calibration curve.
+- Default recommendation for this project: **Platt scaling** (`method="sigmoid"`) because it is robust and less prone to overfitting than isotonic.
+- Consider **isotonic** (`method="isotonic"`) only if you have a large calibration set and the reliability curve shows clear non-linearity (and you can show it improves Brier without hurting lift@K materially).
+
+Two defensible fitting patterns (pick one and be explicit in the notebook for reproducibility):
+
+**Pattern A — CV calibration on training (cleanest separation):**
+- Use only `train` for fitting + calibration via CV:
+  - `CalibratedClassifierCV(estimator=base_pipeline, method="sigmoid", cv=5)` then `.fit(X_train, y_train)`
+- Use `validation` only for model selection/threshold selection and reporting calibration diagnostics (and `test` only for the final report).
+
+**Pattern B — Prefit + calibrate on validation (simple and common):**
+- Fit the chosen model on `train`, then calibrate using `validation`:
+  - `base_model.fit(X_train, y_train)`
+  - `cal = CalibratedClassifierCV(estimator=base_model, method="sigmoid", cv="prefit")`
+  - `cal.fit(X_val, y_val)`
+- After calibration, use `cal.predict_proba(...)` everywhere you use `p̂`.
+- Note: this couples calibration and validation; mitigate by keeping **test** completely untouched for final metrics.
+
+After calibration:
+- Re-plot the reliability curve on validation.
+- Recompute Brier score on validation.
+- Sanity-check that ranking metrics did not collapse (PR‑AUC and lift@K should be similar; calibration may slightly change them).
 
 Deliverable: show “before vs after” calibration curves for the chosen model (one slide worth).
 
 ## 9) Evaluation on test set (metrics + business translation)
 
-### 9.1 Standard ML evaluation
-On test set:
-- PR curve + PR‑AUC
-- ROC curve + ROC‑AUC
-- Choose an operating threshold only after the profit/capacity analysis.
+This section produces the **final, reportable** results. Keep the logic strict:
+- Do **not** tune hyperparameters, calibration, thresholds, or choose K using the test set.
+- Freeze these using training/validation (Steps 7–8), then evaluate **once** on test.
+
+Assumption for Step 9: you have `MODEL_CALIBRATED` from Step 8. If you skip calibration, avoid recommending a probability threshold policy and focus on top‑K ranking only.
+
+### 9.0 Freeze the decision policy (before looking at test)
+Pick one (both are acceptable; state which you use):
+- **Capacity fixed (top‑K):** choose `K*` based on operational capacity (e.g., number of calls per campaign). If you don’t have a real K, pick a plausible range and justify it (e.g., 1k/2k/5k/10k).
+- **Capacity flexible (threshold):** choose scenarios for `(P, C)` and set `t = C/P`. Optionally check a small neighbourhood around `t` on **validation** to ensure it is not clearly dominated in expected profit.
+
+Record in the notebook:
+- chosen `K*` (or list of K values), chosen `(P, C)` grid, chosen `t` (or list of `t = C/P`).
+
+### 9.1 Standard ML evaluation (test set)
+On the **test set**, compute predicted probabilities and headline ML metrics:
+- `p̂_test = MODEL_CALIBRATED.predict_proba(X_test)[:,1]`
+- PR curve + PR‑AUC (primary): `precision_recall_curve`, `average_precision_score`
+- ROC curve + ROC‑AUC (secondary): `roc_curve`, `roc_auc_score`
+
+Deliverables:
+- PR curve with PR‑AUC and base rate annotated.
+- A small table: PR‑AUC, ROC‑AUC, test base rate.
 
 ### 9.2 Capacity-based targeting (top‑K)
 Compute for multiple capacities `K`:
-- Sort customers by `p̂` descending.
+- Sort customers by `p̂_test` descending.
 - For each `K`:
   - `TP_K = sum(y_true in top-K)`
   - `precision@K = TP_K / K`
   - `recall@K = TP_K / total_positives`
   - **lift@K = precision@K / base_rate**
 
+Also report an intuitive “business delta” vs random targeting:
+- `expected_positives_random = K * base_rate`
+- `incremental_positives = TP_K − expected_positives_random`
+
 Deliverables:
 - Table for `K ∈ {1000, 2000, 5000, 10000}` (adjust to your narrative).
 - Gains curve / lift chart figure.
 
 ### 9.3 Profit analysis (threshold and top‑K)
-Define scenario parameters (explicit assumptions):
+Define scenario parameters (explicit assumptions; justify with one sentence in slides):
 - Profit per success `P` (e.g., £200, £500, £1000)
 - Cost per call `C` (e.g., £2, £5, £10)
 
-Compute two versions for transparency:
-- **Realised profit (uses actual y on test):** `profit = TP*P − N_calls*C`
-- **Expected profit (uses probabilities):** `profit = sum(p̂)*P − N_calls*C` (useful for decision-making story)
+Compute both versions for transparency (use the same policy frozen in 9.0):
+- **Realised profit (uses actual `y_test`):** `profit_realised = TP*P − N_calls*C`
+- **Expected profit (uses `p̂_test`):** `profit_expected = Σ(p̂_called)*P − N_calls*C`
+
+Compute a baseline so uplift is meaningful:
+- **Random targeting baseline:** expected conversions `K*base_rate` and expected profit `K*(base_rate*P − C)`
+- Optional: “call nobody” baseline profit = 0.
+
+Profit for top‑K (capacity fixed):
+- For each `K` and each `(P, C)`: call top‑K by `p̂_test`, compute `TP_K`, realised/expected profit, and profit uplift vs random.
+
+Profit for threshold policy (capacity flexible):
+- For each `(P, C)` compute `t = C/P` and call if `p̂_test ≥ t`.
+- Report resulting call volume, conversions, realised/expected profit, and uplift.
+
+Important: if you sweep thresholds to draw a “profit vs threshold” curve, use it as a **descriptive out-of-sample check**; do not choose the final `t` by maximising test profit.
 
 Deliverables:
 - Profit vs K plot (for a few `(P,C)` scenarios).
 - Profit vs threshold plot (sweep thresholds).
 - A sensitivity “heatmap” or small table summarising the recommended `t=C/P` impact.
+
+Deliverable (one-slide version that scores well):
+- A compact table for 3 scenarios (e.g., `(P,C) = (200,5), (500,5), (1000,10)`) showing: `K or t`, calls made, conversions, lift, and realised profit uplift vs random.
 
 ## 10) Model interpretation (turn into business recommendations)
 
@@ -233,4 +299,3 @@ You are finished when:
 - `project.ipynb` runs end-to-end without manual intervention and reproduces the same results (given fixed seeds).
 - You can answer, with numbers and plots, “How many more subscriptions and how much more expected profit do we get if we call top‑K vs random?”
 - You have 8–10 slides that match the required 3 sections: business challenge → technique application → interpretation/recommendations, within 10 minutes.
-
