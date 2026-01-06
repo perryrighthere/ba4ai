@@ -1,0 +1,6 @@
+Pick one and keep it to one line (as required by the brief). Edit to match what you actually did.
+
+- GenAI disclosure: I used ChatGPT/Codex to help structure the analysis plan and draft slide wording; all modelling, results, and references were verified by me in the notebook.
+- GenAI disclosure: I used AI tools to generate an initial outline and to refactor code for clarity; I validated the final outputs by running `project.ipynb` end-to-end and checking all metrics/plots.
+- GenAI disclosure: I used AI tools for brainstorming and editing; I did not use them to fabricate results, and all numbers reported come from the reproduced notebook outputs.
+
